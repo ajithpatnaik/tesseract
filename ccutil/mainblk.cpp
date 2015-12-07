@@ -24,6 +24,9 @@
 #else
 #include          <io.h>
 #endif
+#ifdef _WIN32
+#include <libgen.h>
+#endif
 #include          <stdlib.h>
 #include          "ccutil.h"
 

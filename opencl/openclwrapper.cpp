@@ -30,7 +30,7 @@
 #define CALLOC LEPT_CALLOC
 #define FREE LEPT_FREE
 
-#ifdef USE_OPENCL
+#ifndef USE_OPENCL_
 
 #include "opencl_device_selection.h"
 GPUEnv OpenclDevice::gpuEnv;
@@ -83,173 +83,6 @@ static cl_mem pixsCLBuffer, pixdCLBuffer, pixdCLIntermediate; //Morph operations
 static cl_mem pixThBuffer; //output from thresholdtopix calculation
 static cl_int clStatus;
 static KernelEnv rEnv;
-
-#define DS_TAG_VERSION "<version>"
-#define DS_TAG_VERSION_END "</version>"
-#define DS_TAG_DEVICE "<device>"
-#define DS_TAG_DEVICE_END "</device>"
-#define DS_TAG_SCORE "<score>"
-#define DS_TAG_SCORE_END "</score>"
-#define DS_TAG_DEVICE_TYPE "<type>"
-#define DS_TAG_DEVICE_TYPE_END "</type>"
-#define DS_TAG_DEVICE_NAME "<name>"
-#define DS_TAG_DEVICE_NAME_END "</name>"
-#define DS_TAG_DEVICE_DRIVER_VERSION "<driver>"
-#define DS_TAG_DEVICE_DRIVER_VERSION_END "</driver>"
-
-#define DS_DEVICE_NATIVE_CPU_STRING "native_cpu"
-
-#define DS_DEVICE_NAME_LENGTH 256
-
-typedef enum { DS_EVALUATE_ALL, DS_EVALUATE_NEW_ONLY } ds_evaluation_type;
-
-typedef struct {
-  unsigned int numDevices;
-  ds_device *devices;
-  const char *version;
-} ds_profile;
-
-typedef enum {
-  DS_SUCCESS = 0,
-  DS_INVALID_PROFILE = 1000,
-  DS_MEMORY_ERROR,
-  DS_INVALID_PERF_EVALUATOR_TYPE,
-  DS_INVALID_PERF_EVALUATOR,
-  DS_PERF_EVALUATOR_ERROR,
-  DS_FILE_ERROR,
-  DS_UNKNOWN_DEVICE_TYPE,
-  DS_PROFILE_FILE_ERROR,
-  DS_SCORE_SERIALIZER_ERROR,
-  DS_SCORE_DESERIALIZER_ERROR
-} ds_status;
-
-// Pointer to a function that calculates the score of a device (ex:
-// device->score) update the data size of score. The encoding and the format
-// of the score data is implementation defined. The function should return
-// DS_SUCCESS if there's no error to be reported.
-typedef ds_status (*ds_perf_evaluator)(ds_device *device, void *data);
-
-// deallocate memory used by score
-typedef ds_status (*ds_score_release)(void *score);
-static ds_status releaseDSProfile(ds_profile *profile, ds_score_release sr) {
-  ds_status status = DS_SUCCESS;
-  if (profile != nullptr) {
-    if (profile->devices != nullptr && sr != nullptr) {
-      unsigned int i;
-      for (i = 0; i < profile->numDevices; i++) {
-        free(profile->devices[i].oclDeviceName);
-        free(profile->devices[i].oclDriverVersion);
-        status = sr(profile->devices[i].score);
-        if (status != DS_SUCCESS) break;
-      }
-      free(profile->devices);
-    }
-    free(profile);
-  }
-  return status;
-}
-
-static ds_status initDSProfile(ds_profile **p, const char *version) {
-  int numDevices;
-  cl_uint numPlatforms;
-  cl_platform_id *platforms = nullptr;
-  cl_device_id *devices = nullptr;
-  ds_status status = DS_SUCCESS;
-  unsigned int next;
-  unsigned int i;
-
-  if (p == nullptr) return DS_INVALID_PROFILE;
-
-  ds_profile *profile = (ds_profile *)malloc(sizeof(ds_profile));
-  if (profile == nullptr) return DS_MEMORY_ERROR;
-
-  memset(profile, 0, sizeof(ds_profile));
-
-  clGetPlatformIDs(0, nullptr, &numPlatforms);
-
-  if (numPlatforms > 0) {
-    platforms = (cl_platform_id *)malloc(numPlatforms * sizeof(cl_platform_id));
-    if (platforms == nullptr) {
-      status = DS_MEMORY_ERROR;
-      goto cleanup;
-    }
-    clGetPlatformIDs(numPlatforms, platforms, nullptr);
-  }
-
-  numDevices = 0;
-  for (i = 0; i < (unsigned int)numPlatforms; i++) {
-    cl_uint num;
-    clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, 0, nullptr, &num);
-    numDevices += num;
-  }
-
-  if (numDevices > 0) {
-    devices = (cl_device_id *)malloc(numDevices * sizeof(cl_device_id));
-    if (devices == nullptr) {
-      status = DS_MEMORY_ERROR;
-      goto cleanup;
-    }
-  }
-
-  profile->numDevices =
-      numDevices + 1;  // +1 to numDevices to include the native CPU
-  profile->devices =
-      (ds_device *)malloc(profile->numDevices * sizeof(ds_device));
-  if (profile->devices == nullptr) {
-    profile->numDevices = 0;
-    status = DS_MEMORY_ERROR;
-    goto cleanup;
-  }
-  memset(profile->devices, 0, profile->numDevices * sizeof(ds_device));
-
-  next = 0;
-  for (i = 0; i < (unsigned int)numPlatforms; i++) {
-    cl_uint num;
-    unsigned j;
-    clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, numDevices, devices, &num);
-    for (j = 0; j < num; j++, next++) {
-      char buffer[DS_DEVICE_NAME_LENGTH];
-      size_t length;
-
-      profile->devices[next].type = DS_DEVICE_OPENCL_DEVICE;
-      profile->devices[next].oclDeviceID = devices[j];
-
-      clGetDeviceInfo(profile->devices[next].oclDeviceID, CL_DEVICE_NAME,
-                      DS_DEVICE_NAME_LENGTH, &buffer, nullptr);
-      length = strlen(buffer);
-      profile->devices[next].oclDeviceName = (char *)malloc(length + 1);
-      memcpy(profile->devices[next].oclDeviceName, buffer, length + 1);
-
-      clGetDeviceInfo(profile->devices[next].oclDeviceID, CL_DRIVER_VERSION,
-                      DS_DEVICE_NAME_LENGTH, &buffer, nullptr);
-      length = strlen(buffer);
-      profile->devices[next].oclDriverVersion = (char *)malloc(length + 1);
-      memcpy(profile->devices[next].oclDriverVersion, buffer, length + 1);
-    }
-  }
-  profile->devices[next].type = DS_DEVICE_NATIVE_CPU;
-  profile->version = version;
-
-cleanup:
-  free(platforms);
-  free(devices);
-  if (status == DS_SUCCESS) {
-    *p = profile;
-  } else {
-    if (profile) {
-      free(profile->devices);
-      free(profile);
-    }
-  }
-  return status;
-}
-
-static ds_status profileDevices(ds_profile *profile,
-                                const ds_evaluation_type type,
-                                ds_perf_evaluator evaluator,
-                                void *evaluatorData, unsigned int *numUpdates) {
-  ds_status status = DS_SUCCESS;
-  unsigned int i;
   unsigned int updates = 0;
 
   if (profile == nullptr) {
@@ -673,6 +506,7 @@ int OpenclDevice::LoadOpencl()
 #endif
     return 1;
 }
+
 int OpenclDevice::SetKernelEnv( KernelEnv *envInfo )
 {
     envInfo->mpkContext = gpuEnv.mpContext;
@@ -820,6 +654,7 @@ int OpenclDevice::ReleaseOpenclRunEnv()
 #endif
     return 1;
 }
+
 inline int OpenclDevice::AddKernelConfig( int kCount, const char *kName )
 {
     if ( kCount < 1 )
@@ -828,6 +663,7 @@ inline int OpenclDevice::AddKernelConfig( int kCount, const char *kName )
     gpuEnv.mnKernelCount++;
     return 0;
 }
+
 int OpenclDevice::RegistOpenclKernel()
 {
     if ( !gpuEnv.mnIsUserCreated )
@@ -865,7 +701,6 @@ int OpenclDevice::InitOpenclRunEnv_DeviceSelection( int argc ) {
     return 0;
 }
 
-
 OpenclDevice::OpenclDevice()
 {
     //InitEnv();
@@ -873,7 +708,7 @@ OpenclDevice::OpenclDevice()
 
 OpenclDevice::~OpenclDevice()
 {
-    //ReleaseOpenclRunEnv();
+    ReleaseOpenclRunEnv();
 }
 
 int OpenclDevice::ReleaseOpenclEnv( GPUEnv *gpuInfo )
@@ -910,6 +745,7 @@ int OpenclDevice::ReleaseOpenclEnv( GPUEnv *gpuInfo )
     delete[] gpuInfo->mpArryDevsID;
     return 1;
 }
+
 int OpenclDevice::BinaryGenerated( const char * clFileName, FILE ** fhandle )
 {
     unsigned int i = 0;
@@ -935,6 +771,7 @@ int OpenclDevice::BinaryGenerated( const char * clFileName, FILE ** fhandle )
     return status;
 
 }
+
 int OpenclDevice::CachedOfKernerPrg( const GPUEnv *gpuEnvCached, const char * clFileName )
 {
     int i;
@@ -950,6 +787,7 @@ int OpenclDevice::CachedOfKernerPrg( const GPUEnv *gpuEnvCached, const char * cl
 
     return 0;
 }
+
 int OpenclDevice::WriteBinaryToFile( const char* fileName, const char* birary, size_t numBytes )
 {
   FILE *output = nullptr;
@@ -964,6 +802,7 @@ int OpenclDevice::WriteBinaryToFile( const char* fileName, const char* birary, s
     return 1;
 
 }
+
 int OpenclDevice::GeneratBinFromKernelSource( cl_program program, const char * clFileName )
 {
     unsigned int i = 0;
@@ -1496,7 +1335,7 @@ pixDilateCL(l_int32  hsize, l_int32  vsize, l_int32  wpl, l_int32  h)
         pixtemp = pixsCLBuffer;
         pixsCLBuffer = pixdCLBuffer;
         pixdCLBuffer = pixtemp;
-        }
+      }
     }
     else if (xp > 0 || xn > 0 )
     {
@@ -2814,7 +2653,7 @@ ds_device OpenclDevice::getDeviceSelection( ) {
       // opencl isn't available at runtime, select native cpu device
       printf("[DS] OpenCL runtime not available.\n");
       selectedDevice.type = DS_DEVICE_NATIVE_CPU;
-      selectedDevice.oclDeviceName = "(null)";
+      selectedDevice.oclDeviceName = strdup("(null)");
       selectedDevice.score = nullptr;
       selectedDevice.oclDeviceID = nullptr;
       selectedDevice.oclDriverVersion = nullptr;
